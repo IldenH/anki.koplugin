@@ -273,35 +273,36 @@ function AnkiConnect:add_note(anki_note)
 		return self:show_popup(string.format("Error while creating note:\n\n%s", note), 10, true)
 	end
 
-	local can_sync, err = self:is_running()
-	if not can_sync then
-		return self:store_offline(note, err)
-	end
-
-	if #self.local_notes > 0 then
-		UIManager:show(ConfirmBox:new({
-			text = "There are offline notes which can be synced!",
-			ok_text = "Synchronize",
-			cancel_text = "Cancel",
-			ok_callback = function()
-				self:sync_offline_notes()
-			end,
-		}))
-	end
-	local callback_ok = self:handle_callbacks(note, function(callback_err)
-		return self:store_offline(note, callback_err)
-	end)
-	if callback_ok then
-		note.params.note._field_callbacks = nil
-	end
-
-	local result, request_err = self:post_request(json.encode(note))
-	if request_err then
-		return self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
-	end
-	self.latest_synced_note = { state = "online", id = json.decode(result).result }
-	self.last_message_text = "" -- if we manage to sync once, a following error should be shown again
-	logger.info("note added succesfully: " .. result)
+	return self:store_offline(note)
+	-- local can_sync, err = self:is_running()
+	-- if not can_sync then
+	-- 	return self:store_offline(note, err)
+	-- end
+	--
+	-- if #self.local_notes > 0 then
+	-- 	UIManager:show(ConfirmBox:new({
+	-- 		text = "There are offline notes which can be synced!",
+	-- 		ok_text = "Synchronize",
+	-- 		cancel_text = "Cancel",
+	-- 		ok_callback = function()
+	-- 			self:sync_offline_notes()
+	-- 		end,
+	-- 	}))
+	-- end
+	-- local callback_ok = self:handle_callbacks(note, function(callback_err)
+	-- 	return self:store_offline(note, callback_err)
+	-- end)
+	-- if callback_ok then
+	-- 	note.params.note._field_callbacks = nil
+	-- end
+	--
+	-- local result, request_err = self:post_request(json.encode(note))
+	-- if request_err then
+	-- 	return self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
+	-- end
+	-- self.latest_synced_note = { state = "online", id = json.decode(result).result }
+	-- self.last_message_text = "" -- if we manage to sync once, a following error should be shown again
+	-- logger.info("note added succesfully: " .. result)
 end
 
 function AnkiConnect:store_offline(note, reason, show_always)
@@ -316,7 +317,8 @@ function AnkiConnect:store_offline(note, reason, show_always)
 		f:write(json.encode(note) .. "\n")
 	end)
 	self.latest_synced_note = { state = "offline", id = id }
-	return self:show_popup(string.format("%s\nStored note offline", reason), 3, show_always or false)
+	-- don't need notification when notes always are stored offline
+	-- return self:show_popup(string.format("%s\nStored note offline", reason), 3, show_always or false)
 end
 
 function AnkiConnect:load_notes()
