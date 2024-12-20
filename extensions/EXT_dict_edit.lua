@@ -2,12 +2,8 @@ local conf = require("configuration")
 local DictEdit = {
 	description = "This extension can be used to replace certain patterns in specific dictionaries.",
 	enabled_dictionaries = {
-		["新明解国語辞典　第五版"] = true,
-		["スーパー大辞林　3.0"] = true,
-	},
-	patterns = {
-		"%[[0-9]%]",
-		"%[[0-9]%]:%[0-9%]",
+		["JMdict Japanese-English dictionary"] = true,
+		["JMdict-ja-en"] = true,
 	},
 }
 
@@ -17,9 +13,29 @@ function DictEdit:run(note)
 		return note
 	end
 	local def = note.fields[conf.def_field:get_value()]
-	for _, pattern in ipairs(self.patterns) do
-		def = def:gsub(pattern, "")
-	end
+
+	def = def
+		:gsub(";", ",")
+		--
+		:gsub("%.%.%.", "x")
+		:gsub(", etc%.", "")
+		:gsub("e%.g%. ", "")
+		:gsub("esp%. ", "")
+		:gsub(", to ", ", ")
+		--
+		:gsub("【.-】,", "")
+		:gsub("%., ", ", ")
+		:gsub(", %d ", ", ")
+		:gsub("%.$", "")
+		--
+		:gsub("^.-〘.-〙, ", "")
+		:gsub("〘.-〙, ", "")
+		:gsub("〘.-〙 ", "")
+		--
+		:gsub(", [↔→](.-),", " (%1),")
+		:gsub(", [↔→](.-)$", " (%1)")
+		:gsub("%d([%)%]・])", "%1")
+
 	note.fields[conf.def_field:get_value()] = def
 	return note
 end
