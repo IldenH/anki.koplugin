@@ -30,8 +30,8 @@ function AnkiNote:set_word_trim()
 end
 
 function AnkiNote:convert_to_HTML(opts)
-	local wrapper_template = opts.wrapper_template or '<div class="%s"><ol>%s</ol></div>'
-	local entry_template = opts.entry_template or '<li dict="%s">%s</li>'
+	local wrapper_template = opts.wrapper_template or '<div class="%s">%s</div>'
+	local entry_template = opts.entry_template or '<div dict="%s">%s</div>'
 	local list_items = {}
 	for _, entry in ipairs(opts.entries) do
 		table.insert(list_items, opts.build(entry, entry_template))
@@ -190,7 +190,7 @@ function AnkiNote:get_definition()
 				-- gsub wrapped in () so it only gives us the first result, and discards the index (2nd arg.)
 				return (def:gsub("(<div)( ?)", string.format('%%1 dict="%s"%%2', entry.dict), 1))
 			end
-			return entry_template:format(entry.dict, (def:gsub("\n", "<br>")))
+			return entry_template:format(entry.dict, (def:gsub("\n", ", ")))
 		end,
 	})
 end
