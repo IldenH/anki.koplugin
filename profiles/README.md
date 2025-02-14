@@ -31,6 +31,9 @@ local Config = {
     allow_dupes = false,
     -- The scope where ankiconnect will look to to find duplicates
     dupe_scope = "deck",
+    -- api key - extra authentication supported by ankiconnect, see https://git.foosoft.net/alex/anki-connect#authentication
+    -- this is totally optional and probably unnecessary, unless you expose anki-connect on the public network for some reason
+    api_key = nil,
 
 
     ----------------------------------------------
@@ -64,13 +67,12 @@ local Config = {
 
     -- list of extensions which should be enabled, by default they are all off
     -- an extension is turned on by listing its filename in the table below
+    -- existing extensions are listed below, remove the leading -- to enable them
     enabled_extensions = {
-        --[[
-        "EXT_dict_edit.lua",
-        "EXT_dict_word_lookup.lua",
-        "EXT_multi_def.lua",
-        "EXT_pitch_accent.lua"
-        --]]
+        --"EXT_dict_edit.lua",
+        --"EXT_dict_word_lookup.lua",
+        --"EXT_multi_def.lua",
+        --"EXT_pitch_accent.lua"
     }
 }
 return Config
