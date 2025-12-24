@@ -6,28 +6,40 @@ local lfs = require("libs/libkoreader-lfs")
 -- This represents a Setting defined by the user
 -- e.g. Deck name, note type, etc.
 --]]
-local Setting = {}
+local Setting = {
+    active_luasettings = nil, -- currently loaded profile
+    default_luasettings = nil, -- default profile (if existing)
+}
 local Setting_mt = {
     __index = function(t, key)
         return rawget(t, key) or Setting[key]
     end,
 }
 
--- TODO when you update a setting on the fly it doesn't immediately propagate
 function Setting:get_value_nodefault()
-    return self.profile and self.profile.data[self.id]
+    for _, ls in ipairs({ self.active_luasettings, self.default_luasettings }) do
+        if ls and ls:has(self.id) then
+            return ls:readSetting(self.id)
+        end
+    end
 end
 
 function Setting:get_value()
     return self:get_value_nodefault() or self.default
 end
 
+-- updating/deleting settings only happens in the menu, where there is just one luasettings file in play, always the active one
 function Setting:update_value(new)
-    self.profile:update(self.id, new)
+    if type(new) == "string" and #new == 0 then
+        self.active_luasettings:delSetting(self.id)
+    else
+        self.active_luasettings:saveSetting(self.id, new)
+    end
 end
 
 function Setting:delete()
-    self.profile:delete(self.id)
+    -- this can be nil when deleting a setting that was never set
+    self.active_luasettings:delSetting(self.id)
 end
 
 function Setting:new(opts)
@@ -46,51 +58,14 @@ function Setting:copy(opts)
 end
 
 --[[
--- This represents a Profile created by the user, either the default profile
--- or anything in the ./profiles directory.
---]]
-local Profile = {}
-
-function Profile:new(user_profile, full_path, data)
-    return setmetatable({
-        name = user_profile,
-        path = full_path,
-        data = data,
-    }, {
-        __index = function(t, v)
-            return rawget(t, v) or Profile[v]
-        end,
-    })
-end
-
-function Profile:init_settings()
-    if self.settings then
-        return
-    end
-    self.settings = LuaSettings:open(self.path)
-end
-
-function Profile:update(id, new_value)
-    self:init_settings()
-    self.data[id] = new_value
-    self.settings:saveSetting(id, new_value)
-end
-
-function Profile:delete(id)
-    self:init_settings()
-    self.data[id] = nil
-    self.settings:delSetting(id)
-end
-
---[[
 -- This represents a Configuration, contains settings which can come from different profiles
 -- These entries could be coming from the main profile, or from the default fallback profile (if present)
 --]]
 local Configuration = {
     profiles = {},
-    active_profile = nil, -- the currently loaded configuration
-    Setting:new({ id = "url", required = true }),
-    Setting:new({ id = "api_key", required = false }),
+    active_luasettings = nil, -- the currently loaded configuration
+    url = Setting:new({ id = "url", required = true }),
+    api_key = Setting:new({ id = "api_key", required = false }),
     Setting:new({ id = "deckName", required = true }),
     Setting:new({ id = "modelName", required = true }),
     Setting:new({ id = "word_field", required = true }),
@@ -114,39 +89,39 @@ end
 local plugin_directory = DataStorage:getFullDataDir() .. "/plugins/anki.koplugin/"
 
 function Configuration:load_profile(profile_name)
-    if self.active_profile == profile_name then
+    if self.active_luasettings == profile_name then
         return
     end
-    local main_profile, default_profile = assert(self.profiles[profile_name], ("Non existing profile %s!"):format(profile_name)), self.profiles["default"]
+    local main_profile, default_luasettings = assert(self.profiles[profile_name], ("Non existing profile %s!"):format(profile_name)), self.profiles["default"]
     local missing = {}
     for _, opt in ipairs(self) do
+        opt.active_luasettings = main_profile
+        opt.default_luasettings = default_luasettings
         if main_profile.data[opt.id] then
-            opt.profile = main_profile
             opt.value = main_profile.data[opt.id]
-        elseif default_profile and default_profile.data[opt.id] then
-            opt.profile = default_profile
-            opt.value = default_profile.data[opt.id]
+        elseif default_luasettings and default_luasettings.data[opt.id] then
+            opt.value = default_luasettings.data[opt.id]
         elseif opt.required then
             table.insert(missing, opt.id)
         end
     end
     assert(#missing == 0, ("The following required configuration options are missing:\n - %s"):format(table.concat(missing, "\n - ")))
-    self.active_profile = profile_name
+    self.active_luasettings = profile_name
 end
 
 function Configuration:is_active(profile_name)
-    return self.active_profile == profile_name
+    return self.active_luasettings == profile_name
 end
 
 function Configuration:init_profiles()
     local function init_profile(user_profile)
         if user_profile == "default" then
-            local default_profiles = { "profiles/default.lua", "config.lua" }
-            for _, fn in ipairs(default_profiles) do
+            local default_luasettingss = { "profiles/default.lua", "config.lua" }
+            for _, fn in ipairs(default_luasettingss) do
                 local full_path = plugin_directory .. fn
                 local mod = loadfile(full_path)
                 if mod then
-                    return Profile:new(user_profile, full_path, mod())
+                    return LuaSettings:open(full_path)
                 end
             end
             return
@@ -157,7 +132,7 @@ function Configuration:init_profiles()
         if not mod then
             error(("Could not load profile '%s' in %s: %s"):format(user_profile, plugin_directory, err))
         end
-        return Profile:new(user_profile, full_path, mod())
+        return LuaSettings:open(full_path)
     end
 
     self.profiles.default = init_profile("default")
@@ -167,15 +142,18 @@ function Configuration:init_profiles()
             self.profiles[profile] = init_profile(entry)
         end
     end
+    -- this is horrible
+    local anki_connect_path = DataStorage:getSettingsDir() .. "/ankiconnect.lua"
+    self.anki_connect_luasettings = LuaSettings:open(anki_connect_path)
+    self.url.active_luasettings = self.anki_connect_luasettings
+    self.api_key.active_luasettings = self.anki_connect_luasettings
 end
 
 function Configuration:save()
     for _, p in pairs(self.profiles) do
-        if p.settings then
-            p.settings:close()
-            p.settings = nil
-        end
+        p:close()
     end
+    self.anki_connect_luasettings:close()
 end
 
 Configuration:init_profiles()

@@ -5,7 +5,7 @@ local InputDialog = require("ui/widget/inputdialog")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local util = require("util")
 local List = require("lua_utils.list")
-local config = require("configuration")
+local config = require("anki_configuration")
 
 local general_settings = { "generic_settings", "General Settings" }
 local note_settings = { "note_settings", "Anki Note Settings" }
@@ -14,18 +14,6 @@ local dictionary_settings = { "dictionary_settings", "Dictionary Settings" }
 -- 'raw' entries containing the strings displayed in the menu
 -- keys in the list should match the id of the underlying config option
 local menu_entries = {
-    {
-        id = "url",
-        group = general_settings,
-        name = "AnkiConnect URL",
-        description = "The URL anki_connect is listening on.",
-    },
-    {
-        id = "api_key",
-        group = general_settings,
-        name = "AnkiConnect API key",
-        description = "An optional API key to secure the connection.",
-    },
     {
         id = "deckName",
         group = general_settings,
@@ -163,11 +151,11 @@ function MenuConfigOpt:new(o)
     return setmetatable(new_, { __index = index })
 end
 
-local function build_single_dialog(title, input, hint, description, callback)
+function MenuBuilder.build_single_dialog(title, input, hint, description, callback)
     local input_dialog -- saved first so we can reference it in the callbacks
     input_dialog = InputDialog:new({
         title = title,
-        input = input,
+        input = tostring(input),
         input_hint = hint,
         description = description,
         buttons = {
@@ -197,7 +185,7 @@ function MenuConfigOpt:build_single_dialog()
         self:update_value(dialog:getInputText())
         UIManager:close(dialog)
     end
-    local input_dialog = build_single_dialog(self.name, self:get_value_nodefault(), self.name, self.description, callback)
+    local input_dialog = MenuBuilder.build_single_dialog(self.name, self:get_value_nodefault() or "", self.name, self.description, callback)
     UIManager:show(input_dialog)
     input_dialog:onShowKeyboard()
 end
@@ -251,7 +239,7 @@ function MenuConfigOpt:build_list_dialog()
         UIManager:close(dialog)
     end
     local description = self.description .. "\nMultiple values can be listed, separated by a comma."
-    local input_dialog = build_single_dialog(self.name, table.concat(self:get_value_nodefault() or {}, ","), self.name, description, callback)
+    local input_dialog = MenuBuilder.build_single_dialog(self.name, table.concat(self:get_value_nodefault() or {}, ","), self.name, description, callback)
     UIManager:show(input_dialog)
     input_dialog:onShowKeyboard()
 end
@@ -293,7 +281,7 @@ function MenuConfigOpt:build_map_dialog()
             self:update_value(new)
             UIManager:close(dialog)
         end
-        local input_dialog = build_single_dialog(entry_key, new[entry_key] or "", nil, self.new_entry_value, cb)
+        local input_dialog = MenuBuilder.build_single_dialog(entry_key, new[entry_key] or "", nil, self.new_entry_value, cb)
         UIManager:show(input_dialog)
         input_dialog:onShowKeyboard()
     end
@@ -361,21 +349,12 @@ function MenuBuilder:build()
         local menu_options = {}
         for _, setting in ipairs(config) do
             local user_conf = setting:copy({
-                profile = p,
-                value = p.data[setting.id],
+                active_luasettings = p,
             })
             local idx = menu_entries[setting.id]
             local entry = menu_entries[idx]
             if entry then
-                table.insert(
-                    menu_options,
-                    MenuConfigOpt:new({
-                        user_conf = user_conf,
-                        menu_entry = entry,
-                        idx = idx,
-                        enabled = p.data[setting.id] ~= nil,
-                    })
-                )
+                table.insert(menu_options, MenuConfigOpt:new({ user_conf = user_conf, menu_entry = entry, idx = idx, enabled = p.data[setting.id] ~= nil }))
             end
         end
         table.sort(menu_options, function(a, b)
@@ -400,6 +379,9 @@ function MenuBuilder:build()
         end)
         table.insert(profiles, { text = name, sub_item_table = sub_item_table })
     end
+    if #profiles > 0 then
+        profiles[#profiles].separator = true
+    end
     return profiles
 end
 
@@ -409,10 +391,6 @@ function MenuBuilder:convert_opt(opt)
         keep_menu_open = true,
         --enabled_func = function() return opt.enabled end,
         hold_callback = function()
-            -- no point in allowing deleting of stuff in the default profile
-            if opt.profile.name == "default" then
-                return
-            end
             UIManager:show(ConfirmBox:new({
                 text = "Do you want to delete this setting from the current profile?",
                 ok_callback = function()

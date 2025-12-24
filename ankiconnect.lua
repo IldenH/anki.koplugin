@@ -14,11 +14,16 @@ local DataStorage = require("datastorage")
 local Translator = require("ui/translator")
 local forvo = require("forvo")
 local u = require("lua_utils/utils")
-local conf = require("configuration")
+local conf = require("anki_configuration")
 
-local AnkiConnect = {
-    settings_dir = DataStorage:getSettingsDir(),
-}
+local AnkiConnect = require("ui/widget/widget"):extend({
+    -- NetworkMgr func is device dependent, assume it's true when not implemented.
+    wifi_connected = NetworkMgr.isWifiOn and NetworkMgr:isWifiOn() or true,
+    -- contains notes which we could not sync yet
+    local_notes = {},
+    -- path of notes stored locally when WiFi isn't available
+    notes_filename = DataStorage:getSettingsDir() .. "/anki.koplugin_notes.json",
+})
 
 --[[
 LuaSocket returns somewhat cryptic errors sometimes
@@ -26,75 +31,94 @@ LuaSocket returns somewhat cryptic errors sometimes
 - user uses HTTPS instead of HTTP -> wantread
 We can prevent this by modifying/adding the scheme when it's wrong/missing
 --]]
-function AnkiConnect:get_url()
-    local url = conf.url:get_value()
-    if self.last_url == url then
-        return (assert(self.valid_url, "URL was not validated yet, we should not get here"))
-    end
+function AnkiConnect.sanitize_url(url)
     local valid_url = url
     local _, scheme_end_idx, scheme, ssl = url:find("^(http(s?)://)")
     if not scheme then
         valid_url = "http://" .. url
-    elseif ssl then
-        valid_url = "http://" .. url:sub(scheme_end_idx + 1, #url)
+    elseif ssl and #ssl > 0 then
+        valid_url = "https://" .. url:sub(scheme_end_idx + 1, #url)
     end
-    self.last_url = url
-    self.valid_url = valid_url
     if url ~= valid_url then
         logger.info(("Corrected URL from '%s' to '%s'"):format(url, valid_url))
     end
-    return valid_url
+    return valid_url, ssl ~= nil
 end
 
-function AnkiConnect:with_timeout(timeout, func)
+function AnkiConnect.with_timeout(timeout, func)
     socketutil:set_timeout(timeout)
     local res = { func() } -- store all values returned by function
     socketutil:reset_timeout()
     return unpack(res)
 end
 
-function AnkiConnect:is_running()
+function AnkiConnect:is_running(url)
     if not self.wifi_connected then
         return false, "WiFi disconnected."
     end
-    local result, code, headers = self:with_timeout(1, function()
-        return http.request(self:get_url())
-    end)
-    logger.dbg(string.format("AnkiConnect#is_running = code: %s, headers: %s, result: %s", code, headers, result))
-    return code == 200, string.format("Unable to reach AnkiConnect.\n%s", result or code)
-end
-
-function AnkiConnect:post_request(note)
-    local anki_connect_request = { action = "addNote", params = { note = note }, version = 6, key = conf.api_key:get_value() }
-    local json_payload = json.encode(anki_connect_request)
-    logger.dbg("AnkiConnect#post_request: building POST request with payload: ", json_payload)
-    local output_sink = {} -- contains data returned by request
-    local request = {
-        url = self:get_url(),
-        method = "POST",
-        headers = {
-            ["Content-Type"] = "application/json",
-            ["Content-Length"] = #json_payload,
-        },
-        sink = ltn12.sink.table(output_sink),
-        source = ltn12.source.string(json_payload),
-    }
-    local code, headers, status = socket.skip(1, http.request(request))
-    logger.info(string.format("AnkiConnect#post_request: code: %s, header: %s, status: %s\n", code, headers, status))
-    local result = table.concat(output_sink)
-    return result, self:get_request_error(code, result)
-end
-
-function AnkiConnect:get_request_error(http_return_code, request_data)
-    if http_return_code ~= 200 then
-        return string.format("Invalid return code: %s.", http_return_code)
-    else
-        local json_err = json.decode(request_data)["error"]
-        -- this turns a json NULL in a userdata instance, actual error will be a string
-        if type(json_err) == "string" then
-            return json_err
-        end
+    local anki_connect_request = { action = "requestPermission", version = 6 }
+    local result, error = self:POST({ payload = anki_connect_request, url = url })
+    if error or result.permission == "denied" then
+        return false, error or "Permission denied."
     end
+    return result
+end
+
+function AnkiConnect:get_decknames(url, api_key)
+    local anki_connect_request = { action = "deckNames", version = 6, key = api_key }
+    return self:POST({ payload = anki_connect_request, url = url })
+end
+
+function AnkiConnect:request_add_note(note)
+    local anki_connect_request = { action = "addNote", params = { note = note }, version = 6, key = conf.api_key:get_value() }
+    return self:POST({ payload = anki_connect_request, url = conf.url:get_value() })
+end
+
+function AnkiConnect:POST(opts)
+    local payload = assert(opts.payload, "Missing payload!")
+    if type(payload) ~= "string" then
+        if opts.api_key then
+            payload.key = opts.api_key
+        end
+        payload = json.encode(payload)
+    end
+    local headers = {
+        ["Content-Type"] = "application/json",
+        ["Content-Length"] = #payload,
+    }
+    local url = assert(opts.url, "Missing URL!")
+    local scheme, basic_auth, host = url:match("^(https?://)([^:]+:[^@]+)@(.+)")
+    if basic_auth then
+        headers["Authorization"] = "Basic " .. forvo.base64e(basic_auth)
+        url = scheme .. host
+    end
+    local sink = {}
+    local req = {
+        url = url,
+        method = "POST",
+        headers = headers,
+        sink = ltn12.sink.table(sink),
+        source = ltn12.source.string(payload),
+    }
+    logger.dbg("AnkiConnect#POST request:", req)
+    local status_code, response_headers, status = self.with_timeout(1, function()
+        return socket.skip(1, http.request(req))
+    end)
+    logger.dbg("AnkiConnect#POST response:", status_code, response_headers, status)
+
+    if type(status_code) == "string" then
+        return nil, status_code
+    end
+    if status_code ~= 200 then
+        return nil, string.format("Invalid return code: %s.", status_code)
+    end
+    local response = json.decode(table.concat(sink))
+    local json_err = response.error
+    -- this turns a json NULL in a userdata instance, actual error will be a string
+    if type(json_err) == "string" then
+        return nil, json_err
+    end
+    return response.result
 end
 
 function AnkiConnect:set_translated_context(_, context)
@@ -107,6 +131,11 @@ function AnkiConnect:set_forvo_audio(field, word, language)
     logger.info(("Querying Forvo audio for '%s' in language: %s"):format(word, language))
     local ok, forvo_url = forvo.get_pronunciation_url(word, language)
     if not ok then
+        if forvo_url == "FORVO_403" then
+            -- For 403 errors, return true but no audio data
+            logger.warn("Forvo returned 403 error - continuing without audio")
+            return true, nil
+        end
         return false, ("Could not connect to forvo: %s"):format(forvo_url)
     end
     return true, forvo_url and {
@@ -162,7 +191,7 @@ function AnkiConnect:sync_offline_notes()
         return
     end
 
-    local can_sync, err = self:is_running()
+    local can_sync, err = self:is_running(conf.url:get_value())
     if not can_sync then
         return self:show_popup(string.format("Synchronizing failed!\n%s", err), 3, true)
     end
@@ -173,7 +202,7 @@ function AnkiConnect:sync_offline_notes()
             errs[callback_err] = errs[callback_err] + 1
         end)
         if sync_ok then
-            local _, request_err = self:post_request(note.data)
+            local _, request_err = self:request_add_note(note.data)
             if request_err then
                 sync_ok = false
                 errs[request_err] = errs[request_err] + 1
@@ -236,14 +265,15 @@ function AnkiConnect:delete_latest_note()
         return
     end
     if latest.state == "online" then
-        local can_sync, err = self:is_running()
+        local can_sync, err = self:is_running(conf.url:get_value())
         if not can_sync then
             return self:show_popup(("Could not delete synced note: %s"):format(err), 3, true)
         end
+        local api_key = conf.api_key:get_value()
         -- don't use rapidjson, the anki note ids are 64bit integers, they are turned into different numbers by the json library
         -- presumably because 32 vs 64 bit architecture
-        local delete_request = ([[{"action": "deleteNotes", "version": 6, "params": {"notes": [%d]} }]]):format(latest.id)
-        local _, err = self:post_request(delete_request)
+        local delete_request = ([[{"action": "deleteNotes", "version": 6, "params": {"notes": [%d]}, "key": %s }]]):format(latest.id, api_key and ([["%s"]]):format(api_key) or "null")
+        local _, err = self:POST({ payload = delete_request, url = conf.url:get_value() })
         if err then
             return self:show_popup(("Couldn't delete note: %s!"):format(err), 3, true)
         end
@@ -275,36 +305,35 @@ function AnkiConnect:add_note(anki_note)
         return self:show_popup(string.format("Error while creating note:\n\n%s", note), 10, true)
     end
 
-    return self:store_offline(note)
-    -- local can_sync, err = self:is_running()
-    -- if not can_sync then
-    -- 	return self:store_offline(note, err)
-    -- end
-    --
-    -- if #self.local_notes > 0 then
-    -- 	UIManager:show(ConfirmBox:new({
-    -- 		text = "There are offline notes which can be synced!",
-    -- 		ok_text = "Synchronize",
-    -- 		cancel_text = "Cancel",
-    -- 		ok_callback = function()
-    -- 			self:sync_offline_notes()
-    -- 		end,
-    -- 	}))
-    -- end
-    -- local callback_ok = self:handle_callbacks(note, function(callback_err)
-    -- 	return self:store_offline(note, callback_err)
-    -- end)
-    -- if callback_ok then
-    -- 	note.params.note._field_callbacks = nil
-    -- end
-    --
-    -- local result, request_err = self:post_request(json.encode(note))
-    -- if request_err then
-    -- 	return self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
-    -- end
-    -- self.latest_synced_note = { state = "online", id = json.decode(result).result }
-    -- self.last_message_text = "" -- if we manage to sync once, a following error should be shown again
-    -- logger.info("note added succesfully: " .. result)
+    local can_sync, err = self:is_running(conf.url:get_value())
+    if not can_sync then
+        return self:store_offline(note, err)
+    end
+
+    if #self.local_notes > 0 then
+        UIManager:show(ConfirmBox:new({
+            text = "There are offline notes which can be synced!",
+            ok_text = "Synchronize",
+            cancel_text = "Cancel",
+            ok_callback = function()
+                self:sync_offline_notes()
+            end,
+        }))
+    end
+    local callback_ok = self:handle_callbacks(note, function(callback_err)
+        return self:show_popup(string.format("Error while handling callbacks:\n\n%s", callback_err), 3, true)
+    end)
+    if not callback_ok then
+        return
+    end
+
+    local result, request_err = self:request_add_note(note.data)
+    if request_err then
+        return self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
+    end
+    self.latest_synced_note = { state = "online", id = result }
+    self.last_message_text = "" -- if we manage to sync once, a following error should be shown again
+    logger.info("note added succesfully: " .. result)
 end
 
 function AnkiConnect:store_offline(note, reason, show_always)
@@ -332,22 +361,15 @@ function AnkiConnect:load_notes()
             end
         end
     end)
-    logger.dbg(string.format("Loaded %d notes from disk.", #self.local_notes))
+    logger.dbg(("Loaded %d notes from disk."):format(#self.local_notes))
 end
 
--- [[
--- required args:
--- * url: to connect to remote AnkiConnect session
--- * ui: necessary to get context of word in AnkiNote
--- ]]
-function AnkiConnect:new(opts)
-    -- NetworkMgr func is device dependent, assume it's true when not implemented.
-    self.wifi_connected = NetworkMgr.isWifiOn and NetworkMgr:isWifiOn() or true
-    -- contains notes which we could not sync yet
-    self.local_notes = {}
-    -- path of notes stored locally when WiFi isn't available
-    self.notes_filename = self.settings_dir .. "/anki.koplugin_notes.json"
-    return setmetatable({}, { __index = self })
+function AnkiConnect:onNetworkConnected()
+    self.wifi_connected = true
+end
+
+function AnkiConnect:onNetworkDisconnected()
+    self.wifi_connected = false
 end
 
 return AnkiConnect
